@@ -1,0 +1,14 @@
+[Unit]
+Description=Local YouTube Live Translate Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/rezax/Dev/youtube-live-translate
+EnvironmentFile=/home/rezax/Dev/youtube-live-translate/.env
+ExecStart=/usr/bin/systemd-inhibit --what=idle --why=youtube-live-translate /usr/sbin/runuser -u rezax -- /usr/bin/env bash -lc '/home/rezax/.nvm/versions/node/v22.14.0/bin/node /home/rezax/Dev/youtube-live-translate/dist/server.js'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+.html5-video-player.local-agent-youtube-native-hidden .ytp-caption-window-container {
+  opacity: 0 !important;
+}
+
+.local-agent-youtube-overlay {
+  position: absolute;
+  left: 50%;
+  bottom: 8%;
+  transform: translateX(-50%);
+  width: min(80vw, 1100px);
+  padding: 0 2vw;
+  text-align: center;
+  pointer-events: none;
+  z-index: 48;
+  font-family: "YouTube Noto", "Roboto", Arial, sans-serif;
+}
+
+.local-agent-youtube-overlay[hidden] {
+  display: none !important;
+}
+
+.local-agent-youtube-overlay-english,
+.local-agent-youtube-overlay-translation {
+  white-space: pre-wrap;
+  text-shadow:
+    rgba(0, 0, 0, 0.94) 0 0 2px,
+    rgba(0, 0, 0, 0.88) 0 0 6px,
+    rgba(0, 0, 0, 0.72) 0 0 12px;
+}
+
+.local-agent-youtube-overlay-english {
+  color: #ffffff;
+  font-size: clamp(18px, 2.4vw, 34px);
+  font-weight: 600;
+  line-height: 1.18;
+}
+
+.local-agent-youtube-overlay-translation {
+  margin-top: 0.22em;
+  color: #c8ff8f;
+  font-size: clamp(17px, 2.15vw, 30px);
+  font-weight: 600;
+  line-height: 1.18;
+}
