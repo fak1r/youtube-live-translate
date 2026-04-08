@@ -98,7 +98,7 @@ function normalizeTimeline(payload) {
             sourceText: normalizeText(segment.sourceText),
             translation: normalizeText(segment.translation)
           }))
-          .filter((segment) => segment.sourceText && segment.translation)
+          .filter((segment) => segment.sourceText)
       : []
   };
 }

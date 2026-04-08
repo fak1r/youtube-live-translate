@@ -12,6 +12,7 @@ const maxTextCacheEntries = 1_500;
 const maxSourceTranscriptEntries = 24;
 const prefetchBatchMaxSegments = 100;
 const prefetchBatchMaxChars = 6_000;
+const liveSourceTranscriptRefreshMs = 5_000;
 const curlBinaryPath = "/usr/bin/curl";
 const curlStatusMarker = "\n__LOCAL_AGENT_HTTP_STATUS__:";
 const defaultBrowserUserAgent =
@@ -58,6 +59,8 @@ interface SourceTranscriptEntry {
   title: string | null;
   author: string | null;
   sourceLanguage: string;
+  isLiveContent: boolean;
+  fetchedAt: number;
   segments: Array<{
     offset: number;
     duration: number;
@@ -135,7 +138,7 @@ export class YouTubeLiveTranslateService {
   private async getSourceTranscript(reference: YouTubeVideoReference) {
     const memoryCached = this.sourceTranscriptCache.get(reference.videoId);
 
-    if (memoryCached) {
+    if (memoryCached && !shouldRefreshLiveTranscript(memoryCached)) {
       return memoryCached;
     }
 
@@ -145,9 +148,21 @@ export class YouTubeLiveTranslateService {
       return await pending;
     }
 
-    const operation = this.fetchSourceTranscript(reference).finally(() => {
-      this.inflightSourceTranscript.delete(reference.videoId);
-    });
+    const operation = this.fetchSourceTranscript(reference)
+      .catch((error) => {
+        if (memoryCached) {
+          this.options.logger?.warn(
+            { error, videoId: reference.videoId },
+            "Falling back to cached YouTube transcript after refresh failure",
+          );
+          return memoryCached;
+        }
+
+        throw error;
+      })
+      .finally(() => {
+        this.inflightSourceTranscript.delete(reference.videoId);
+      });
 
     this.inflightSourceTranscript.set(reference.videoId, operation);
 
@@ -162,6 +177,8 @@ export class YouTubeLiveTranslateService {
       title: transcriptResult.videoDetails.title?.trim() || null,
       author: transcriptResult.videoDetails.author?.trim() || null,
       sourceLanguage: transcriptResult.segments[0]?.lang?.trim() || "en",
+      isLiveContent: Boolean(transcriptResult.videoDetails.isLiveContent),
+      fetchedAt: Date.now(),
       segments: (transcriptResult.segments as TranscriptSegment[])
         .map((segment: TranscriptSegment) => ({
           offset: Number.isFinite(segment.offset) ? segment.offset : 0,
@@ -526,4 +543,8 @@ function normalizeCurlProxyUrl(proxyUrl: string) {
   const normalized = proxyUrl.trim();
 
   return normalized ? normalized : "";
+}
+
+function shouldRefreshLiveTranscript(entry: SourceTranscriptEntry) {
+  return entry.isLiveContent && Date.now() - entry.fetchedAt >= liveSourceTranscriptRefreshMs;
 }

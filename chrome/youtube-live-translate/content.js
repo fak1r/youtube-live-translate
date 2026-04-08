@@ -8,7 +8,7 @@ const nativeHiddenClassName = "local-agent-youtube-native-hidden";
 const activeSegmentEpsilon = 0.18;
 const windowBeforeSeconds = 4;
 const windowAfterSeconds = 24;
-const windowRefreshLeadSeconds = 6;
+const windowRefreshLeadSeconds = 10;
 
 let currentVideoId = "";
 let currentTimeline = null;
@@ -97,8 +97,8 @@ function renderFrame() {
   const activeSegments = getActiveSegmentsAtTime(currentTimeline.segments, video.currentTime);
 
   if (!activeSegments.length) {
+    showNativeCaptions();
     hideOverlay();
-    hideNativeCaptions(player);
     return;
   }
 
@@ -316,7 +316,7 @@ function normalizeTimeline(payload) {
             sourceText: normalizeText(segment.sourceText),
             translation: normalizeText(segment.translation)
           }))
-          .filter((segment) => segment.sourceText && segment.translation)
+          .filter((segment) => segment.sourceText)
       : []
   };
 }
