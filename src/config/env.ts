@@ -2,57 +2,51 @@ import "dotenv/config";
 import { z } from "zod";
 import type { UpstreamProxyConfig, YouTubeLiveTranslateConfig } from "./types.js";
 
+const defaultServerHost = "127.0.0.1";
+const defaultServerPort = 32123;
+const defaultModel = "Xenova/opus-mt-en-ru";
+const defaultTranslationTimeoutMs = 15_000;
+const defaultModelCacheDir = "runtime/youtube-live-translate-model-cache";
+const defaultLocalProxyHost = "127.0.0.1";
+const defaultLocalProxyPort = 11_081;
+const defaultProxyStartupTimeoutMs = 15_000;
+const defaultXrayPath = process.platform === "win32" ? "xray.exe" : "xray";
+
 const rawEnvSchema = z.object({
-  NODE_ENV: z
-    .enum(["development", "production", "test"])
-    .default("development"),
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   LOG_LEVEL: z.string().default("info"),
+  PROXY: z.string().default(""),
   UPSTREAM_PROXY_URL: z.string().default(""),
   UPSTREAM_PROXY_SS_URL: z.string().default(""),
-  UPSTREAM_PROXY_LOCAL_HOST: z.string().default("127.0.0.1"),
-  UPSTREAM_PROXY_LOCAL_PORT: z.coerce.number().int().min(1).max(65535).default(11081),
-  UPSTREAM_PROXY_XRAY_PATH: z.string().default("/usr/local/bin/xray"),
-  UPSTREAM_PROXY_STARTUP_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(15_000),
-  YOUTUBE_LIVE_TRANSLATE_ENABLED: z
-    .string()
-    .default("true")
-    .transform((value) => value.trim().toLowerCase() !== "false"),
-  YOUTUBE_LIVE_TRANSLATE_HOST: z.string().default("127.0.0.1"),
-  YOUTUBE_LIVE_TRANSLATE_PORT: z.coerce.number().int().min(1).max(65535).default(32123),
-  YOUTUBE_LIVE_TRANSLATE_MODEL: z.string().default("Xenova/opus-mt-en-ru"),
-  YOUTUBE_LIVE_TRANSLATE_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
-  YOUTUBE_LIVE_TRANSLATE_MODEL_CACHE_DIR: z
-    .string()
-    .default("runtime/youtube-live-translate-model-cache"),
 });
 
 const parsedEnv = rawEnvSchema.parse(process.env);
 const upstreamUrl =
+  parsedEnv.PROXY.trim() ||
   parsedEnv.UPSTREAM_PROXY_URL.trim() ||
   parsedEnv.UPSTREAM_PROXY_SS_URL.trim();
+
 const upstreamProxy: UpstreamProxyConfig = {
   enabled: Boolean(upstreamUrl),
   upstreamUrl,
-  localHost: parsedEnv.UPSTREAM_PROXY_LOCAL_HOST.trim() || "127.0.0.1",
-  localPort: parsedEnv.UPSTREAM_PROXY_LOCAL_PORT,
-  xrayPath: parsedEnv.UPSTREAM_PROXY_XRAY_PATH.trim() || "/usr/local/bin/xray",
-  startupTimeoutMs: parsedEnv.UPSTREAM_PROXY_STARTUP_TIMEOUT_MS,
-  proxyUrl: `http://${parsedEnv.UPSTREAM_PROXY_LOCAL_HOST}:${parsedEnv.UPSTREAM_PROXY_LOCAL_PORT}`,
+  localHost: defaultLocalProxyHost,
+  localPort: defaultLocalProxyPort,
+  xrayPath: defaultXrayPath,
+  startupTimeoutMs: defaultProxyStartupTimeoutMs,
+  proxyUrl: `http://${defaultLocalProxyHost}:${defaultLocalProxyPort}`,
 };
 
 const youtubeLiveTranslate: YouTubeLiveTranslateConfig = {
-  enabled: parsedEnv.YOUTUBE_LIVE_TRANSLATE_ENABLED,
-  host: parsedEnv.YOUTUBE_LIVE_TRANSLATE_HOST.trim() || "127.0.0.1",
-  port: parsedEnv.YOUTUBE_LIVE_TRANSLATE_PORT,
-  model: parsedEnv.YOUTUBE_LIVE_TRANSLATE_MODEL.trim() || "Xenova/opus-mt-en-ru",
-  timeoutMs: parsedEnv.YOUTUBE_LIVE_TRANSLATE_TIMEOUT_MS,
-  modelCacheDir:
-    parsedEnv.YOUTUBE_LIVE_TRANSLATE_MODEL_CACHE_DIR.trim() ||
-    "runtime/youtube-live-translate-model-cache",
+  host: defaultServerHost,
+  port: defaultServerPort,
+  model: defaultModel,
+  timeoutMs: defaultTranslationTimeoutMs,
+  modelCacheDir: defaultModelCacheDir,
 };
 
 export const env = {
-  ...parsedEnv,
+  NODE_ENV: parsedEnv.NODE_ENV,
+  LOG_LEVEL: parsedEnv.LOG_LEVEL,
   UPSTREAM_PROXY: upstreamProxy,
   YOUTUBE_LIVE_TRANSLATE: youtubeLiveTranslate,
 };

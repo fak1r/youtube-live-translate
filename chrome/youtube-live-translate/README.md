@@ -2,6 +2,8 @@
 
 Chrome extension for live English-to-Russian subtitle translation on YouTube.
 
+The extension works with the local server on Windows, macOS, and Linux.
+
 ## Load In Chrome
 
 1. Open `chrome://extensions`

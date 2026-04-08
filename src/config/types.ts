@@ -9,7 +9,6 @@ export interface UpstreamProxyConfig {
 }
 
 export interface YouTubeLiveTranslateConfig {
-  enabled: boolean;
   host: string;
   port: number;
   model: string;

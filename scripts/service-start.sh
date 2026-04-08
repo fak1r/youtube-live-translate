@@ -2,9 +2,11 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-UNIT_SRC="$REPO_DIR/systemd/youtube-live-translate.service"
 UNIT_DST="/etc/systemd/system/youtube-live-translate.service"
 SERVICE_NAME="youtube-live-translate"
+SERVICE_USER="${SUDO_USER:-$USER}"
+NODE_BINARY="$(node -p 'process.execPath')"
+ENV_FILE="$REPO_DIR/.env"
 
 cd "$REPO_DIR"
 
@@ -12,7 +14,24 @@ echo "[youtube-live-translate] building project"
 npm run build
 
 echo "[youtube-live-translate] installing systemd unit"
-sudo cp "$UNIT_SRC" "$UNIT_DST"
+sudo tee "$UNIT_DST" >/dev/null <<EOF
+[Unit]
+Description=Local YouTube Live Translate Service
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+WorkingDirectory=$REPO_DIR
+EnvironmentFile=-$ENV_FILE
+ExecStart=$NODE_BINARY $REPO_DIR/dist/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 sudo systemctl daemon-reload
 
 echo "[youtube-live-translate] enabling service"

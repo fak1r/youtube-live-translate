@@ -30,7 +30,7 @@ interface ParsedVlessConfig {
 
 type ParsedProxyConfig = ParsedShadowsocksConfig | ParsedVlessConfig;
 
-const proxyEnvVarHint = "UPSTREAM_PROXY_URL (or UPSTREAM_PROXY_SS_URL)";
+const proxyEnvVarHint = "PROXY";
 
 function decodeBase64Url(input: string) {
   const normalized = input.replace(/-/g, "+").replace(/_/g, "/");

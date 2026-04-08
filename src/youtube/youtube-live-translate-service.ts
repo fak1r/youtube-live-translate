@@ -264,9 +264,6 @@ export class YouTubeLiveTranslateService {
       routes.push({ label, proxyUrl: normalized });
     };
 
-    addRoute("system-proxy", process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "");
-    addRoute("system-proxy", process.env.https_proxy || process.env.http_proxy || "");
-
     if (this.options.proxy.enabled) {
       addRoute("local-proxy", this.options.proxy.proxyUrl);
     }
