@@ -18,6 +18,12 @@ interface PrefetchWindowRequestPayload {
   windowAfterSeconds?: unknown;
 }
 
+interface TranslateLiveCaptionRequestPayload {
+  text?: unknown;
+}
+
+class RequestValidationError extends Error {}
+
 export class YouTubeLiveTranslateServer {
   private server: ReturnType<typeof createServer> | null = null;
 
@@ -35,14 +41,17 @@ export class YouTubeLiveTranslateServer {
         this.options.logger?.error({ error }, "YouTube live translate server request failed");
 
         if (!response.headersSent) {
-          response.writeHead(500, {
+          response.writeHead(error instanceof RequestValidationError ? 400 : 500, {
             "Content-Type": "application/json; charset=utf-8",
           });
         }
 
         response.end(
           JSON.stringify({
-            error: "Internal server error.",
+            error:
+              error instanceof RequestValidationError && error.message.trim()
+                ? error.message
+                : "Internal server error.",
           }),
         );
       }
@@ -123,7 +132,11 @@ export class YouTubeLiveTranslateServer {
       return;
     }
 
-    if (requestUrl.pathname !== "/api/youtube-live-translate/prefetch-window") {
+    const isPrefetchWindowRoute = requestUrl.pathname === "/api/youtube-live-translate/prefetch-window";
+    const isTranslateLiveCaptionRoute =
+      requestUrl.pathname === "/api/youtube-live-translate/translate-live-caption";
+
+    if (!isPrefetchWindowRoute && !isTranslateLiveCaptionRoute) {
       response.writeHead(404, {
         "Content-Type": "application/json; charset=utf-8",
       });
@@ -157,6 +170,17 @@ export class YouTubeLiveTranslateServer {
       return;
     }
 
+    const result = isPrefetchWindowRoute
+      ? await this.handlePrefetchWindowRequest(request)
+      : await this.handleTranslateLiveCaptionRequest(request);
+
+    response.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+    });
+    response.end(JSON.stringify(result));
+  }
+
+  private async handlePrefetchWindowRequest(request: IncomingMessage) {
     const payload = await this.readJsonBody<PrefetchWindowRequestPayload>(request);
     const url = typeof payload.url === "string" ? payload.url.trim() : "";
     const currentTime =
@@ -173,24 +197,28 @@ export class YouTubeLiveTranslateServer {
         : 24;
 
     if (!url) {
-      response.writeHead(400, {
-        "Content-Type": "application/json; charset=utf-8",
-      });
-      response.end(JSON.stringify({ error: "Request body must include video url." }));
-      return;
+      throw new RequestValidationError("Request body must include video url.");
     }
 
-    const result = await this.options.service.prefetchWindow({
+    return await this.options.service.prefetchWindow({
       url,
       currentTime,
       windowBeforeSeconds,
       windowAfterSeconds,
     });
+  }
 
-    response.writeHead(200, {
-      "Content-Type": "application/json; charset=utf-8",
+  private async handleTranslateLiveCaptionRequest(request: IncomingMessage) {
+    const payload = await this.readJsonBody<TranslateLiveCaptionRequestPayload>(request);
+    const text = typeof payload.text === "string" ? payload.text.trim() : "";
+
+    if (!text) {
+      throw new RequestValidationError("Request body must include live caption text.");
+    }
+
+    return await this.options.service.translateLiveCaptionText({
+      text,
     });
-    response.end(JSON.stringify(result));
   }
 
   private isAllowedOrigin(origin: string) {

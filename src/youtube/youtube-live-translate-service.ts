@@ -159,6 +159,52 @@ export class YouTubeLiveTranslateService {
     };
   }
 
+  async translateLiveCaptionText(input: { text: string }) {
+    if (!this.isConfigured()) {
+      throw new Error("YouTube live translate is not configured. Local model is missing.");
+    }
+
+    const sourceText = normalizeSubtitleText(input.text);
+
+    if (!sourceText) {
+      return {
+        sourceText: "",
+        translation: "",
+        model: this.translator.getModelId(),
+        generatedAt: Date.now(),
+        cached: false,
+      };
+    }
+
+    const cachedTranslation = this.textCache.get(sourceText);
+
+    if (typeof cachedTranslation === "string" && cachedTranslation) {
+      return {
+        sourceText,
+        translation: cachedTranslation,
+        model: this.translator.getModelId(),
+        generatedAt: Date.now(),
+        cached: true,
+      };
+    }
+
+    const translations = await this.translateBatchWithFallback([sourceText]);
+    const translation = normalizeTranslationText(translations[0] ?? "");
+
+    if (translation) {
+      this.textCache.set(sourceText, translation);
+      trimMap(this.textCache, maxTextCacheEntries);
+    }
+
+    return {
+      sourceText,
+      translation,
+      model: this.translator.getModelId(),
+      generatedAt: Date.now(),
+      cached: false,
+    };
+  }
+
   private prefetchFutureSegments(videoId: string, segments: SourceTranscriptEntry["segments"]) {
     if (!segments.length || this.inflightAheadTranslation.has(videoId)) {
       return;
