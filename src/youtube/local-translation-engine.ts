@@ -8,6 +8,11 @@ interface LocalTranslationEngineOptions {
   logger?: Logger;
 }
 
+interface TranslateBatchOptions {
+  numBeams?: number;
+  maxNewTokens?: number;
+}
+
 type TranslationPipeline = (
   input: string[],
   options?: {
@@ -41,7 +46,7 @@ export class LocalTranslationEngine {
     });
   }
 
-  async translateBatch(lines: string[]) {
+  async translateBatch(lines: string[], options: TranslateBatchOptions = {}) {
     if (!this.isConfigured()) {
       throw new Error("Local translation model is not configured.");
     }
@@ -52,8 +57,8 @@ export class LocalTranslationEngine {
 
     const pipeline = await this.getPipeline();
     const rawResult = await pipeline(lines, {
-      num_beams: 1,
-      max_new_tokens: estimateMaxNewTokens(lines),
+      num_beams: options.numBeams ?? 1,
+      max_new_tokens: options.maxNewTokens ?? estimateMaxNewTokens(lines),
     });
     const translations = normalizeTranslationOutputs(rawResult);
 

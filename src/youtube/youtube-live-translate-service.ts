@@ -12,7 +12,12 @@ const maxTextCacheEntries = 1_500;
 const maxSourceTranscriptEntries = 24;
 const prefetchBatchMaxSegments = 100;
 const prefetchBatchMaxChars = 6_000;
-const liveSourceTranscriptRefreshMs = 5_000;
+const liveSourceTranscriptRefreshMs = 1_500;
+const liveAheadPrefetchSeconds = 90;
+const liveAheadPrefetchMaxSegments = 48;
+const retryTranslationNumBeams = 2;
+const retryTranslationMinNewTokens = 24;
+const retryTranslationMaxNewTokens = 96;
 const curlBinaryPath = "/usr/bin/curl";
 const curlStatusMarker = "\n__LOCAL_AGENT_HTTP_STATUS__:";
 const defaultBrowserUserAgent =
@@ -41,6 +46,8 @@ export interface YouTubeLiveTranslateTimelineResult {
   author: string | null;
   sourceLanguage: string;
   model: string;
+  live: boolean;
+  generatedAt: number;
   cached: boolean;
   complete: boolean;
   rangeStart: number;
@@ -78,6 +85,7 @@ export class YouTubeLiveTranslateService {
   private readonly textCache = new Map<string, string>();
   private readonly sourceTranscriptCache = new Map<string, SourceTranscriptEntry>();
   private readonly inflightSourceTranscript = new Map<string, Promise<SourceTranscriptEntry>>();
+  private readonly inflightAheadTranslation = new Map<string, Promise<void>>();
 
   constructor(private readonly options: YouTubeLiveTranslateServiceOptions) {
     this.translator = new LocalTranslationEngine({
@@ -113,7 +121,21 @@ export class YouTubeLiveTranslateService {
       input.windowBeforeSeconds,
       input.windowAfterSeconds,
     );
+    const futureSegments = sourceTranscript.isLiveContent
+      ? sliceFutureTranscriptWindow(
+          sourceTranscript.segments,
+          selectedSegments,
+          input.currentTime,
+          input.windowAfterSeconds,
+          liveAheadPrefetchSeconds,
+          liveAheadPrefetchMaxSegments,
+        )
+      : [];
     const translatedSegments = await this.translateSegments(selectedSegments);
+
+    if (futureSegments.length > 0) {
+      this.prefetchFutureSegments(reference.videoId, futureSegments);
+    }
 
     return {
       videoId: reference.videoId,
@@ -122,6 +144,8 @@ export class YouTubeLiveTranslateService {
       author: sourceTranscript.author,
       sourceLanguage: sourceTranscript.sourceLanguage,
       model: this.translator.getModelId(),
+      live: sourceTranscript.isLiveContent,
+      generatedAt: Date.now(),
       cached: false,
       complete: false,
       rangeStart:
@@ -133,6 +157,23 @@ export class YouTubeLiveTranslateService {
           : input.currentTime,
       segments: translatedSegments,
     };
+  }
+
+  private prefetchFutureSegments(videoId: string, segments: SourceTranscriptEntry["segments"]) {
+    if (!segments.length || this.inflightAheadTranslation.has(videoId)) {
+      return;
+    }
+
+    const operation = this.translateSegments(segments)
+      .then(() => undefined)
+      .catch((error) => {
+        this.options.logger?.debug({ error, videoId }, "Future subtitle translation prefetch failed");
+      })
+      .finally(() => {
+        this.inflightAheadTranslation.delete(videoId);
+      });
+
+    this.inflightAheadTranslation.set(videoId, operation);
   }
 
   private async getSourceTranscript(reference: YouTubeVideoReference) {
@@ -369,7 +410,10 @@ export class YouTubeLiveTranslateService {
         const segment = segments[batchEntry.index]!;
         const translation = translations[index]!;
 
-        this.textCache.set(segment.sourceText, translation);
+        if (translation) {
+          this.textCache.set(segment.sourceText, translation);
+        }
+
         output[batchEntry.index] = {
           offset: segment.offset,
           duration: segment.duration,
@@ -385,15 +429,99 @@ export class YouTubeLiveTranslateService {
   }
 
   private async translateBatchWithFallback(lines: string[]) {
-    const normalizedLines = lines.map((line) => normalizeSubtitleText(line)).filter(Boolean);
+    const normalizedLines = lines.map((line) => normalizeSubtitleText(line));
 
-    if (!normalizedLines.length) {
-      return [];
+    if (!normalizedLines.some(Boolean)) {
+      return new Array(lines.length).fill("");
     }
 
     const translations = await this.translator.translateBatch(normalizedLines);
+    const normalizedTranslations = translations.map((translation) => normalizeTranslationText(translation));
 
-    return translations.map((translation) => normalizeTranslationText(translation));
+    if (normalizedTranslations.length !== normalizedLines.length) {
+      throw new Error(
+        `Local translation output length mismatch: expected ${normalizedLines.length}, received ${normalizedTranslations.length}.`,
+      );
+    }
+
+    const output = [...normalizedTranslations];
+    const retryIndexes = normalizedLines.flatMap((line, index) =>
+      line && !normalizedTranslations[index] ? [index] : [],
+    );
+
+    const retriedEntries = await Promise.all(
+      retryIndexes.map(async (index) => ({
+        index,
+        sourceText: normalizedLines[index]!,
+        translation: await this.retrySingleTranslation(normalizedLines[index]!),
+      })),
+    );
+
+    for (const retriedEntry of retriedEntries) {
+      if (retriedEntry.translation) {
+        output[retriedEntry.index] = retriedEntry.translation;
+        continue;
+      }
+
+      this.options.logger?.warn(
+        { sourceText: truncateText(retriedEntry.sourceText, 180) },
+        "Subtitle translation remained empty after retry",
+      );
+    }
+
+    return output;
+  }
+
+  private async retrySingleTranslation(line: string) {
+    const translation = await this.translateSingleLineWithRetryOptions(line);
+
+    if (translation) {
+      return translation;
+    }
+
+    if (line.includes("\n")) {
+      const translatedLines: string[] = [];
+
+      for (const part of line.split("\n").map((entry) => entry.trim()).filter(Boolean)) {
+        const partTranslation = await this.translateSingleLineWithRetryOptions(part);
+
+        if (!partTranslation) {
+          this.options.logger?.debug(
+            { sourceText: truncateText(part, 180) },
+            "Line-by-line subtitle translation retry returned empty output",
+          );
+          return "";
+        }
+
+        translatedLines.push(partTranslation);
+      }
+
+      return normalizeTranslationText(translatedLines.join("\n"));
+    }
+
+    this.options.logger?.debug(
+      { sourceText: truncateText(line, 180) },
+      "Single-line subtitle translation retry returned empty output",
+    );
+
+    return "";
+  }
+
+  private async translateSingleLineWithRetryOptions(line: string) {
+    try {
+      const translations = await this.translator.translateBatch([line], {
+        numBeams: retryTranslationNumBeams,
+        maxNewTokens: estimateRetryMaxNewTokens(line),
+      });
+
+      return normalizeTranslationText(translations[0] ?? "");
+    } catch (error) {
+      this.options.logger?.debug(
+        { error, sourceText: truncateText(line, 180) },
+        "Single-line subtitle translation retry failed",
+      );
+      return "";
+    }
   }
 }
 
@@ -457,6 +585,47 @@ function sliceTranscriptWindow<T extends { offset: number; duration: number }>(
 
     return segmentEnd >= rangeStart && segmentStart <= rangeEnd;
   });
+}
+
+function sliceFutureTranscriptWindow<T extends { offset: number; duration: number }>(
+  segments: T[],
+  selectedSegments: T[],
+  currentTime: number,
+  windowAfterSeconds: number,
+  aheadSeconds: number,
+  maxSegments: number,
+) {
+  if (!segments.length || maxSegments <= 0 || aheadSeconds <= 0) {
+    return [];
+  }
+
+  const currentRangeEnd =
+    selectedSegments.length > 0
+      ? (selectedSegments[selectedSegments.length - 1]?.offset ?? currentTime) +
+        (selectedSegments[selectedSegments.length - 1]?.duration ?? 0)
+      : currentTime + Math.max(0, windowAfterSeconds);
+  const futureRangeEnd = currentRangeEnd + aheadSeconds;
+  const output: T[] = [];
+
+  for (const segment of segments) {
+    const segmentStart = segment.offset;
+
+    if (segmentStart <= currentRangeEnd) {
+      continue;
+    }
+
+    if (segmentStart > futureRangeEnd) {
+      break;
+    }
+
+    output.push(segment);
+
+    if (output.length >= maxSegments) {
+      break;
+    }
+  }
+
+  return output;
 }
 
 function buildTextBatches(entries: Array<{ index: number; text: string }>) {
@@ -544,4 +713,11 @@ function normalizeCurlProxyUrl(proxyUrl: string) {
 
 function shouldRefreshLiveTranscript(entry: SourceTranscriptEntry) {
   return entry.isLiveContent && Date.now() - entry.fetchedAt >= liveSourceTranscriptRefreshMs;
+}
+
+function estimateRetryMaxNewTokens(line: string) {
+  return Math.min(
+    retryTranslationMaxNewTokens,
+    Math.max(retryTranslationMinNewTokens, Math.ceil(line.length * 0.75)),
+  );
 }

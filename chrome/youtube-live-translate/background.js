@@ -1,6 +1,7 @@
 const prefetchWindowApiUrl = "http://127.0.0.1:32123/api/youtube-live-translate/prefetch-window";
 const maxTimelineCacheEntries = 24;
 const requestTimeoutMs = 25000;
+const liveTimelineCacheTtlMs = 1200;
 const windowTimelineCache = new Map();
 const inflightWindowPrefetch = new Map();
 
@@ -37,7 +38,12 @@ async function prefetchWindow(message) {
 
   const cachedWindow = windowTimelineCache.get(videoKey);
 
-  if (cachedWindow && currentTime >= cachedWindow.rangeStart && currentTime <= cachedWindow.rangeEnd) {
+  if (
+    cachedWindow &&
+    currentTime >= cachedWindow.rangeStart &&
+    currentTime <= cachedWindow.rangeEnd &&
+    (!cachedWindow.live || Date.now() - cachedWindow.generatedAt < liveTimelineCacheTtlMs)
+  ) {
     return {
       ...cachedWindow,
       cached: true
@@ -86,6 +92,8 @@ function normalizeTimeline(payload) {
     author: typeof payload.author === "string" ? payload.author : "",
     sourceLanguage: typeof payload.sourceLanguage === "string" ? payload.sourceLanguage : "en",
     model: typeof payload.model === "string" ? payload.model : "",
+    live: Boolean(payload.live),
+    generatedAt: Number.isFinite(payload.generatedAt) ? Number(payload.generatedAt) : Date.now(),
     cached: Boolean(payload.cached),
     complete: Boolean(payload.complete),
     rangeStart: Number.isFinite(payload.rangeStart) ? Number(payload.rangeStart) : 0,

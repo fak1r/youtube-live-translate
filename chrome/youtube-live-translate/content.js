@@ -9,6 +9,8 @@ const activeSegmentEpsilon = 0.18;
 const windowBeforeSeconds = 4;
 const windowAfterSeconds = 24;
 const windowRefreshLeadSeconds = 10;
+const liveWindowRefreshIntervalMs = 1200;
+const untranslatedSegmentRetryMs = 450;
 
 let currentVideoId = "";
 let currentTimeline = null;
@@ -95,8 +97,9 @@ function renderFrame() {
   }
 
   const activeSegments = getActiveSegmentsAtTime(currentTimeline.segments, video.currentTime);
+  const preparedSegments = activeSegments.filter((segment) => normalizeText(segment.translation));
 
-  if (!activeSegments.length) {
+  if (!activeSegments.length || preparedSegments.length !== activeSegments.length) {
     showNativeCaptions();
     hideOverlay();
     return;
@@ -110,9 +113,9 @@ function renderFrame() {
     return;
   }
 
-  const nextEnglishText = normalizeText(activeSegments.map((segment) => segment.sourceText).join("\n"));
+  const nextEnglishText = normalizeText(preparedSegments.map((segment) => segment.sourceText).join("\n"));
   const nextTranslationText = normalizeText(
-    activeSegments.map((segment) => segment.translation).join("\n")
+    preparedSegments.map((segment) => segment.translation).join("\n")
   );
 
   if (nextEnglishText !== lastEnglishText) {
@@ -153,6 +156,20 @@ function maybeRefreshWindow() {
 
   if (currentTimeline.complete) {
     return;
+  }
+
+  if (currentTimeline.live) {
+    const activeSegments = getActiveSegmentsAtTime(currentTimeline.segments, currentTime);
+    const hasUntranslatedActiveSegment = activeSegments.some((segment) => !normalizeText(segment.translation));
+    const timelineAgeMs = Date.now() - (Number(currentTimeline.generatedAt) || 0);
+
+    if (
+      timelineAgeMs >= liveWindowRefreshIntervalMs ||
+      (hasUntranslatedActiveSegment && timelineAgeMs >= untranslatedSegmentRetryMs)
+    ) {
+      void fetchWindowTimeline();
+      return;
+    }
   }
 
   if (
@@ -304,6 +321,8 @@ function normalizeTimeline(payload) {
     author: typeof payload.author === "string" ? payload.author : "",
     sourceLanguage: typeof payload.sourceLanguage === "string" ? payload.sourceLanguage : "en",
     model: typeof payload.model === "string" ? payload.model : "",
+    live: Boolean(payload.live),
+    generatedAt: Number.isFinite(payload.generatedAt) ? Number(payload.generatedAt) : Date.now(),
     cached: Boolean(payload.cached),
     complete: Boolean(payload.complete),
     rangeStart: Number.isFinite(payload.rangeStart) ? Number(payload.rangeStart) : 0,
