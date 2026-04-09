@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Local Agent YouTube Live Translate",
+  "name": "YouTube Live Translate",
   "description": "Shows a Russian translation under English YouTube subtitles using the local youtube-live-translate server.",
   "version": "1.0.0",
   "minimum_chrome_version": "120",
@@ -26,6 +26,6 @@
     }
   ],
   "action": {
-    "default_title": "Local Agent YouTube Live Translate"
+    "default_title": "YouTube Live Translate"
   }
 }

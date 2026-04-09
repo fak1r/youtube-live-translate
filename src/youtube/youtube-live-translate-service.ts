@@ -19,7 +19,7 @@ const retryTranslationNumBeams = 2;
 const retryTranslationMinNewTokens = 24;
 const retryTranslationMaxNewTokens = 96;
 const curlBinaryPath = "/usr/bin/curl";
-const curlStatusMarker = "\n__LOCAL_AGENT_HTTP_STATUS__:";
+const curlStatusMarker = "\n__YOUTUBE_LIVE_TRANSLATE_HTTP_STATUS__:";
 const defaultBrowserUserAgent =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 const execFileAsync = promisify(execFile);
