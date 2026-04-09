@@ -2,6 +2,7 @@ const playerSelector = ".html5-video-player";
 const videoSelector = "video.html5-main-video";
 const subtitlesButtonSelector = ".ytp-subtitles-button";
 const overlayClassName = "local-agent-youtube-overlay";
+const overlaySelectableClassName = "local-agent-youtube-overlay-selectable";
 const overlayEnglishClassName = "local-agent-youtube-overlay-english";
 const overlayTranslationClassName = "local-agent-youtube-overlay-translation";
 const nativeHiddenClassName = "local-agent-youtube-native-hidden";
@@ -113,6 +114,8 @@ function renderFrame() {
     return;
   }
 
+  updateOverlaySelectionState(overlay, video.paused);
+
   const nextEnglishText = normalizeText(preparedSegments.map((segment) => segment.sourceText).join("\n"));
   const nextTranslationText = normalizeText(
     preparedSegments.map((segment) => segment.translation).join("\n")
@@ -145,6 +148,10 @@ function maybeRefreshWindow() {
   const video = getVideo();
 
   if (!(video instanceof HTMLVideoElement)) {
+    return;
+  }
+
+  if (video.paused) {
     return;
   }
 
@@ -251,6 +258,8 @@ function hideOverlay() {
   const overlay = document.querySelector(`.${overlayClassName}`);
 
   if (overlay instanceof HTMLElement) {
+    updateOverlaySelectionState(overlay, false);
+
     if (!overlay.hasAttribute("hidden")) {
       overlay.setAttribute("hidden", "hidden");
     }
@@ -270,6 +279,35 @@ function showNativeCaptions() {
 
   if (player && player.classList.contains(nativeHiddenClassName)) {
     player.classList.remove(nativeHiddenClassName);
+  }
+}
+
+function updateOverlaySelectionState(overlay, enabled) {
+  const isEnabled = overlay.classList.contains(overlaySelectableClassName);
+
+  if (enabled === isEnabled) {
+    return;
+  }
+
+  overlay.classList.toggle(overlaySelectableClassName, enabled);
+
+  if (!enabled) {
+    clearOverlaySelection(overlay);
+  }
+}
+
+function clearOverlaySelection(overlay) {
+  const selection = window.getSelection();
+
+  if (!selection || !selection.rangeCount) {
+    return;
+  }
+
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+
+  if ((anchorNode && overlay.contains(anchorNode)) || (focusNode && overlay.contains(focusNode))) {
+    selection.removeAllRanges();
   }
 }
 

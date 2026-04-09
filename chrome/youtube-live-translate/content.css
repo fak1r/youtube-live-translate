@@ -19,6 +19,16 @@
   display: none !important;
 }
 
+.local-agent-youtube-overlay.local-agent-youtube-overlay-selectable
+  .local-agent-youtube-overlay-english,
+.local-agent-youtube-overlay.local-agent-youtube-overlay-selectable
+  .local-agent-youtube-overlay-translation {
+  -webkit-user-select: text;
+  user-select: text;
+  pointer-events: auto;
+  cursor: text;
+}
+
 .local-agent-youtube-overlay-english,
 .local-agent-youtube-overlay-translation {
   white-space: pre-wrap;
