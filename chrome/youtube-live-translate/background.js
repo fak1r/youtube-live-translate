@@ -1,13 +1,9 @@
 const prefetchWindowApiUrl = "http://127.0.0.1:32123/api/youtube-live-translate/prefetch-window";
-const translateLiveCaptionApiUrl = "http://127.0.0.1:32123/api/youtube-live-translate/translate-live-caption";
 const maxTimelineCacheEntries = 24;
-const maxLiveCaptionCacheEntries = 500;
 const requestTimeoutMs = 25000;
 const liveTimelineCacheTtlMs = 1200;
 const windowTimelineCache = new Map();
-const liveCaptionTranslationCache = new Map();
 const inflightWindowPrefetch = new Map();
-const inflightLiveCaptionTranslation = new Map();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.type !== "string") {
@@ -16,19 +12,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "prefetch-window") {
     prefetchWindow(message)
-      .then((result) => sendResponse({ ok: true, ...result }))
-      .catch((error) =>
-        sendResponse({
-          ok: false,
-          error: error instanceof Error ? error.message : String(error)
-        })
-      );
-
-    return true;
-  }
-
-  if (message.type === "translate-live-caption") {
-    translateLiveCaption(message)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) =>
         sendResponse({
@@ -100,60 +83,6 @@ async function prefetchWindow(message) {
   inflightWindowPrefetch.set(requestKey, request);
   return await request;
 }
-
-async function translateLiveCaption(message) {
-  const text = normalizeText(message.text);
-
-  if (!text) {
-    throw new Error("Live caption text is required.");
-  }
-
-  const cachedTranslation = liveCaptionTranslationCache.get(text);
-
-  if (typeof cachedTranslation === "string" && cachedTranslation) {
-    return {
-      sourceText: text,
-      translation: cachedTranslation,
-      generatedAt: Date.now(),
-      cached: true
-    };
-  }
-
-  const pending = inflightLiveCaptionTranslation.get(text);
-
-  if (pending) {
-    return await pending;
-  }
-
-  const request = requestJson(translateLiveCaptionApiUrl, {
-    text
-  })
-    .then((payload) => {
-      const sourceText = normalizeText(payload.sourceText || text);
-      const translation = normalizeText(payload.translation);
-
-      if (translation) {
-        liveCaptionTranslationCache.set(sourceText || text, translation);
-        trimCache(liveCaptionTranslationCache, maxLiveCaptionCacheEntries);
-      }
-
-      return {
-        sourceText: sourceText || text,
-        translation,
-        model: typeof payload.model === "string" ? payload.model : "",
-        generatedAt: Number.isFinite(payload.generatedAt) ? Number(payload.generatedAt) : Date.now(),
-        cached: Boolean(payload.cached)
-      };
-    })
-    .finally(() => {
-      inflightLiveCaptionTranslation.delete(text);
-    });
-
-  inflightLiveCaptionTranslation.set(text, request);
-
-  return await request;
-}
-
 function normalizeTimeline(payload) {
   return {
     videoId: typeof payload.videoId === "string" ? payload.videoId.trim() : "",

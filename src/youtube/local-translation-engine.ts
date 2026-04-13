@@ -23,6 +23,7 @@ type TranslationPipeline = (
 
 export class LocalTranslationEngine {
   private pipelinePromise: Promise<TranslationPipeline> | null = null;
+  private translationQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: LocalTranslationEngineOptions) {}
 
@@ -55,20 +56,32 @@ export class LocalTranslationEngine {
       return [];
     }
 
-    const pipeline = await this.getPipeline();
-    const rawResult = await pipeline(lines, {
-      num_beams: options.numBeams ?? 1,
-      max_new_tokens: options.maxNewTokens ?? estimateMaxNewTokens(lines),
+    let releaseQueue = () => {};
+    const previousQueue = this.translationQueue;
+    this.translationQueue = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
     });
-    const translations = normalizeTranslationOutputs(rawResult);
 
-    if (translations.length !== lines.length) {
-      throw new Error(
-        `Local translation output length mismatch: expected ${lines.length}, received ${translations.length}.`,
-      );
+    await previousQueue;
+
+    try {
+      const pipeline = await this.getPipeline();
+      const rawResult = await pipeline(lines, {
+        num_beams: options.numBeams ?? 1,
+        max_new_tokens: options.maxNewTokens ?? estimateMaxNewTokens(lines),
+      });
+      const translations = normalizeTranslationOutputs(rawResult);
+
+      if (translations.length !== lines.length) {
+        throw new Error(
+          `Local translation output length mismatch: expected ${lines.length}, received ${translations.length}.`,
+        );
+      }
+
+      return translations;
+    } finally {
+      releaseQueue();
     }
-
-    return translations;
   }
 
   private async getPipeline() {

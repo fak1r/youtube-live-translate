@@ -13,8 +13,12 @@ const maxSourceTranscriptEntries = 24;
 const prefetchBatchMaxSegments = 100;
 const prefetchBatchMaxChars = 6_000;
 const liveSourceTranscriptRefreshMs = 1_500;
-const liveAheadPrefetchSeconds = 90;
-const liveAheadPrefetchMaxSegments = 48;
+const liveUrgentBeforeSeconds = 0.75;
+const liveUrgentAfterSeconds = 4;
+const liveAheadPrefetchSeconds = 12;
+const liveAheadPrefetchMaxSegments = 12;
+const aheadPrefetchBatchMaxSegments = 4;
+const aheadPrefetchBatchMaxChars = 320;
 const retryTranslationNumBeams = 2;
 const retryTranslationMinNewTokens = 24;
 const retryTranslationMaxNewTokens = 96;
@@ -85,7 +89,9 @@ export class YouTubeLiveTranslateService {
   private readonly textCache = new Map<string, string>();
   private readonly sourceTranscriptCache = new Map<string, SourceTranscriptEntry>();
   private readonly inflightSourceTranscript = new Map<string, Promise<SourceTranscriptEntry>>();
-  private readonly inflightAheadTranslation = new Map<string, Promise<void>>();
+  private readonly queuedAheadTexts = new Set<string>();
+  private readonly aheadTextQueue: string[] = [];
+  private aheadPrefetchActive = false;
 
   constructor(private readonly options: YouTubeLiveTranslateServiceOptions) {
     this.translator = new LocalTranslationEngine({
@@ -121,21 +127,9 @@ export class YouTubeLiveTranslateService {
       input.windowBeforeSeconds,
       input.windowAfterSeconds,
     );
-    const futureSegments = sourceTranscript.isLiveContent
-      ? sliceFutureTranscriptWindow(
-          sourceTranscript.segments,
-          selectedSegments,
-          input.currentTime,
-          input.windowAfterSeconds,
-          liveAheadPrefetchSeconds,
-          liveAheadPrefetchMaxSegments,
-        )
-      : [];
-    const translatedSegments = await this.translateSegments(selectedSegments);
-
-    if (futureSegments.length > 0) {
-      this.prefetchFutureSegments(reference.videoId, futureSegments);
-    }
+    const translatedSegments = sourceTranscript.isLiveContent
+      ? await this.translateLiveWindow(selectedSegments, sourceTranscript.segments, input.currentTime)
+      : await this.translateSegments(selectedSegments);
 
     return {
       videoId: reference.videoId,
@@ -159,67 +153,118 @@ export class YouTubeLiveTranslateService {
     };
   }
 
-  async translateLiveCaptionText(input: { text: string }) {
-    if (!this.isConfigured()) {
-      throw new Error("YouTube live translate is not configured. Local model is missing.");
+  private async translateLiveWindow(
+    selectedSegments: SourceTranscriptEntry["segments"],
+    sourceSegments: SourceTranscriptEntry["segments"],
+    currentTime: number,
+  ) {
+    const urgentSegments = sliceTranscriptWindow(
+      selectedSegments,
+      currentTime,
+      liveUrgentBeforeSeconds,
+      liveUrgentAfterSeconds,
+    );
+
+    if (urgentSegments.length > 0) {
+      await this.translateSegments(urgentSegments);
     }
 
-    const sourceText = normalizeSubtitleText(input.text);
+    const aheadSegments = sliceFutureTranscriptWindow(
+      sourceSegments,
+      urgentSegments,
+      currentTime,
+      liveUrgentAfterSeconds,
+      liveAheadPrefetchSeconds,
+      liveAheadPrefetchMaxSegments,
+    );
 
-    if (!sourceText) {
-      return {
-        sourceText: "",
-        translation: "",
-        model: this.translator.getModelId(),
-        generatedAt: Date.now(),
-        cached: false,
-      };
+    if (aheadSegments.length > 0) {
+      this.prefetchFutureSegments(aheadSegments);
     }
 
-    const cachedTranslation = this.textCache.get(sourceText);
-
-    if (typeof cachedTranslation === "string" && cachedTranslation) {
-      return {
-        sourceText,
-        translation: cachedTranslation,
-        model: this.translator.getModelId(),
-        generatedAt: Date.now(),
-        cached: true,
-      };
-    }
-
-    const translations = await this.translateBatchWithFallback([sourceText]);
-    const translation = normalizeTranslationText(translations[0] ?? "");
-
-    if (translation) {
-      this.textCache.set(sourceText, translation);
-      trimMap(this.textCache, maxTextCacheEntries);
-    }
-
-    return {
-      sourceText,
-      translation,
-      model: this.translator.getModelId(),
-      generatedAt: Date.now(),
-      cached: false,
-    };
+    return this.projectSegmentsWithCachedTranslations(selectedSegments);
   }
 
-  private prefetchFutureSegments(videoId: string, segments: SourceTranscriptEntry["segments"]) {
-    if (!segments.length || this.inflightAheadTranslation.has(videoId)) {
+  private projectSegmentsWithCachedTranslations(
+    segments: SourceTranscriptEntry["segments"],
+  ): YouTubeLiveTranslateSegment[] {
+    return segments.map((segment) => ({
+      offset: segment.offset,
+      duration: segment.duration,
+      sourceText: segment.sourceText,
+      translation: this.textCache.get(segment.sourceText) ?? "",
+    }));
+  }
+
+  private prefetchFutureSegments(segments: SourceTranscriptEntry["segments"]) {
+    let queuedAnyText = false;
+
+    for (const segment of segments) {
+      const sourceText = normalizeSubtitleText(segment.sourceText);
+
+      if (!sourceText || this.textCache.has(sourceText) || this.queuedAheadTexts.has(sourceText)) {
+        continue;
+      }
+
+      this.queuedAheadTexts.add(sourceText);
+      this.aheadTextQueue.push(sourceText);
+      queuedAnyText = true;
+    }
+
+    if (queuedAnyText && !this.aheadPrefetchActive) {
+      void this.drainAheadPrefetchQueue();
+    }
+  }
+
+  private async drainAheadPrefetchQueue() {
+    if (this.aheadPrefetchActive) {
       return;
     }
 
-    const operation = this.translateSegments(segments)
-      .then(() => undefined)
-      .catch((error) => {
-        this.options.logger?.debug({ error, videoId }, "Future subtitle translation prefetch failed");
-      })
-      .finally(() => {
-        this.inflightAheadTranslation.delete(videoId);
-      });
+    this.aheadPrefetchActive = true;
 
-    this.inflightAheadTranslation.set(videoId, operation);
+    try {
+      while (this.aheadTextQueue.length > 0) {
+        const batch = takeTextBatchFromQueue(
+          this.aheadTextQueue,
+          aheadPrefetchBatchMaxSegments,
+          aheadPrefetchBatchMaxChars,
+        );
+
+        if (!batch.length) {
+          break;
+        }
+
+        try {
+          const translations = await this.translateBatchWithFallback(batch);
+
+          for (let index = 0; index < batch.length; index += 1) {
+            const sourceText = batch[index]!;
+            const translation = translations[index]!;
+
+            if (translation) {
+              this.textCache.set(sourceText, translation);
+            }
+          }
+
+          trimMap(this.textCache, maxTextCacheEntries);
+        } catch (error) {
+          this.options.logger?.debug({ error }, "Future subtitle translation prefetch batch failed");
+        } finally {
+          for (const sourceText of batch) {
+            this.queuedAheadTexts.delete(sourceText);
+          }
+        }
+
+        await yieldToEventLoop();
+      }
+    } finally {
+      this.aheadPrefetchActive = false;
+
+      if (this.aheadTextQueue.length > 0) {
+        void this.drainAheadPrefetchQueue();
+      }
+    }
   }
 
   private async getSourceTranscript(reference: YouTubeVideoReference) {
@@ -700,6 +745,34 @@ function buildTextBatches(entries: Array<{ index: number; text: string }>) {
   }
 
   return batches;
+}
+
+function takeTextBatchFromQueue(queue: string[], maxSegments: number, maxChars: number) {
+  const batch: string[] = [];
+  let currentChars = 0;
+
+  while (queue.length > 0) {
+    const nextText = queue[0] ?? "";
+    const nextChars = currentChars + nextText.length;
+    const shouldStop =
+      batch.length >= maxSegments ||
+      (batch.length > 0 && nextChars > maxChars);
+
+    if (shouldStop) {
+      break;
+    }
+
+    batch.push(queue.shift() ?? "");
+    currentChars = nextChars;
+  }
+
+  return batch.filter(Boolean);
+}
+
+function yieldToEventLoop() {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 function normalizeSubtitleText(value: string) {

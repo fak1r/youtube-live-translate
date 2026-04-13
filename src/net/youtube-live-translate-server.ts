@@ -18,10 +18,6 @@ interface PrefetchWindowRequestPayload {
   windowAfterSeconds?: unknown;
 }
 
-interface TranslateLiveCaptionRequestPayload {
-  text?: unknown;
-}
-
 class RequestValidationError extends Error {}
 
 export class YouTubeLiveTranslateServer {
@@ -133,10 +129,8 @@ export class YouTubeLiveTranslateServer {
     }
 
     const isPrefetchWindowRoute = requestUrl.pathname === "/api/youtube-live-translate/prefetch-window";
-    const isTranslateLiveCaptionRoute =
-      requestUrl.pathname === "/api/youtube-live-translate/translate-live-caption";
 
-    if (!isPrefetchWindowRoute && !isTranslateLiveCaptionRoute) {
+    if (!isPrefetchWindowRoute) {
       response.writeHead(404, {
         "Content-Type": "application/json; charset=utf-8",
       });
@@ -170,9 +164,7 @@ export class YouTubeLiveTranslateServer {
       return;
     }
 
-    const result = isPrefetchWindowRoute
-      ? await this.handlePrefetchWindowRequest(request)
-      : await this.handleTranslateLiveCaptionRequest(request);
+    const result = await this.handlePrefetchWindowRequest(request);
 
     response.writeHead(200, {
       "Content-Type": "application/json; charset=utf-8",
@@ -205,19 +197,6 @@ export class YouTubeLiveTranslateServer {
       currentTime,
       windowBeforeSeconds,
       windowAfterSeconds,
-    });
-  }
-
-  private async handleTranslateLiveCaptionRequest(request: IncomingMessage) {
-    const payload = await this.readJsonBody<TranslateLiveCaptionRequestPayload>(request);
-    const text = typeof payload.text === "string" ? payload.text.trim() : "";
-
-    if (!text) {
-      throw new RequestValidationError("Request body must include live caption text.");
-    }
-
-    return await this.options.service.translateLiveCaptionText({
-      text,
     });
   }
 
