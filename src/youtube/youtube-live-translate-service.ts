@@ -17,6 +17,9 @@ const liveUrgentBeforeSeconds = 0.75;
 const liveUrgentAfterSeconds = 4;
 const liveAheadPrefetchSeconds = 12;
 const liveAheadPrefetchMaxSegments = 12;
+const vodUrgentAfterSeconds = 6;
+const vodAheadPrefetchSeconds = 18;
+const vodAheadPrefetchMaxSegments = 24;
 const aheadPrefetchBatchMaxSegments = 4;
 const aheadPrefetchBatchMaxChars = 320;
 const retryTranslationNumBeams = 2;
@@ -127,9 +130,17 @@ export class YouTubeLiveTranslateService {
       input.windowBeforeSeconds,
       input.windowAfterSeconds,
     );
-    const translatedSegments = sourceTranscript.isLiveContent
-      ? await this.translateLiveWindow(selectedSegments, sourceTranscript.segments, input.currentTime)
-      : await this.translateSegments(selectedSegments);
+    const translatedSegments = await this.translateSelectedWindow({
+      selectedSegments,
+      sourceSegments: sourceTranscript.segments,
+      currentTime: input.currentTime,
+      selectedWindowAfterSeconds: input.windowAfterSeconds,
+      urgentAfterSeconds: sourceTranscript.isLiveContent ? liveUrgentAfterSeconds : vodUrgentAfterSeconds,
+      aheadPrefetchSeconds: sourceTranscript.isLiveContent ? liveAheadPrefetchSeconds : vodAheadPrefetchSeconds,
+      aheadPrefetchMaxSegments: sourceTranscript.isLiveContent
+        ? liveAheadPrefetchMaxSegments
+        : vodAheadPrefetchMaxSegments,
+    });
 
     return {
       videoId: reference.videoId,
@@ -153,36 +164,48 @@ export class YouTubeLiveTranslateService {
     };
   }
 
-  private async translateLiveWindow(
-    selectedSegments: SourceTranscriptEntry["segments"],
-    sourceSegments: SourceTranscriptEntry["segments"],
-    currentTime: number,
-  ) {
+  private async translateSelectedWindow(input: {
+    selectedSegments: SourceTranscriptEntry["segments"];
+    sourceSegments: SourceTranscriptEntry["segments"];
+    currentTime: number;
+    selectedWindowAfterSeconds: number;
+    urgentAfterSeconds: number;
+    aheadPrefetchSeconds: number;
+    aheadPrefetchMaxSegments: number;
+  }) {
     const urgentSegments = sliceTranscriptWindow(
-      selectedSegments,
-      currentTime,
+      input.selectedSegments,
+      input.currentTime,
       liveUrgentBeforeSeconds,
-      liveUrgentAfterSeconds,
+      input.urgentAfterSeconds,
     );
 
     if (urgentSegments.length > 0) {
       await this.translateSegments(urgentSegments);
     }
 
-    const aheadSegments = sliceFutureTranscriptWindow(
-      sourceSegments,
-      urgentSegments,
-      currentTime,
-      liveUrgentAfterSeconds,
-      liveAheadPrefetchSeconds,
-      liveAheadPrefetchMaxSegments,
+    const aheadSegments = mergeAheadPrefetchSegments(
+      takeFutureSegmentsFromSelection(
+        input.selectedSegments,
+        input.currentTime + input.urgentAfterSeconds,
+        input.aheadPrefetchMaxSegments,
+      ),
+      sliceFutureTranscriptWindow(
+        input.sourceSegments,
+        input.selectedSegments,
+        input.currentTime,
+        input.selectedWindowAfterSeconds,
+        input.aheadPrefetchSeconds,
+        input.aheadPrefetchMaxSegments,
+      ),
+      input.aheadPrefetchMaxSegments,
     );
 
     if (aheadSegments.length > 0) {
       this.prefetchFutureSegments(aheadSegments);
     }
 
-    return this.projectSegmentsWithCachedTranslations(selectedSegments);
+    return this.projectSegmentsWithCachedTranslations(input.selectedSegments);
   }
 
   private projectSegmentsWithCachedTranslations(
@@ -277,7 +300,7 @@ export class YouTubeLiveTranslateService {
     const pending = this.inflightSourceTranscript.get(reference.videoId);
 
     if (pending) {
-      return await pending;
+      return memoryCached ?? await pending;
     }
 
     const operation = this.fetchSourceTranscript(reference)
@@ -297,6 +320,10 @@ export class YouTubeLiveTranslateService {
       });
 
     this.inflightSourceTranscript.set(reference.videoId, operation);
+
+    if (memoryCached) {
+      return memoryCached;
+    }
 
     return await operation;
   }
@@ -709,6 +736,62 @@ function sliceFutureTranscriptWindow<T extends { offset: number; duration: numbe
       break;
     }
 
+    output.push(segment);
+
+    if (output.length >= maxSegments) {
+      break;
+    }
+  }
+
+  return output;
+}
+
+function takeFutureSegmentsFromSelection<T extends { offset: number; duration: number; sourceText: string }>(
+  segments: T[],
+  minOffset: number,
+  maxSegments: number,
+) {
+  if (!segments.length || maxSegments <= 0) {
+    return [];
+  }
+
+  const output: T[] = [];
+
+  for (const segment of segments) {
+    if (segment.offset <= minOffset) {
+      continue;
+    }
+
+    output.push(segment);
+
+    if (output.length >= maxSegments) {
+      break;
+    }
+  }
+
+  return output;
+}
+
+function mergeAheadPrefetchSegments<T extends { sourceText: string }>(
+  primarySegments: T[],
+  secondarySegments: T[],
+  maxSegments: number,
+) {
+  if (maxSegments <= 0) {
+    return [];
+  }
+
+  const output: T[] = [];
+  const seenTexts = new Set<string>();
+
+  for (const segment of [...primarySegments, ...secondarySegments]) {
+    const sourceText = normalizeSubtitleText(segment.sourceText);
+
+    if (!sourceText || seenTexts.has(sourceText)) {
+      continue;
+    }
+
+    seenTexts.add(sourceText);
     output.push(segment);
 
     if (output.length >= maxSegments) {

@@ -4,14 +4,16 @@ const subtitlesButtonSelector = ".ytp-subtitles-button";
 const overlayClassName = "youtube-live-translate-overlay";
 const overlaySelectableClassName = "youtube-live-translate-overlay-selectable";
 const overlayEnglishClassName = "youtube-live-translate-overlay-english";
-const overlayTranslationClassName = "youtube-live-translate-overlay-translation";
+const overlayTranslationClassName =
+  "youtube-live-translate-overlay-translation";
 const nativeHiddenClassName = "youtube-live-translate-native-hidden";
 const activeSegmentEpsilon = 0.18;
 const windowBeforeSeconds = 4;
 const windowAfterSeconds = 24;
 const windowRefreshLeadSeconds = 10;
 const liveWindowRefreshIntervalMs = 1200;
-const untranslatedSegmentRetryMs = 450;
+const untranslatedSegmentRetryMs = 250;
+const overlayHandoffGraceMs = 150;
 
 let currentVideoId = "";
 let currentTimeline = null;
@@ -20,6 +22,9 @@ let windowPrefetchInFlight = false;
 let renderTimer = 0;
 let lastEnglishText = "";
 let lastTranslationText = "";
+let lastRenderedSegmentsKey = "";
+let overlayHandoffUntil = 0;
+let overlayHandoffSourceKey = "";
 let overlayVisible = false;
 
 bootstrap();
@@ -76,6 +81,9 @@ function resetVideoState() {
   windowPrefetchInFlight = false;
   lastEnglishText = "";
   lastTranslationText = "";
+  lastRenderedSegmentsKey = "";
+  overlayHandoffUntil = 0;
+  overlayHandoffSourceKey = "";
   overlayVisible = false;
   showNativeCaptions();
   hideOverlay();
@@ -91,16 +99,54 @@ function renderFrame() {
     return;
   }
 
-  if (!currentTimeline || !Array.isArray(currentTimeline.segments) || !currentTimeline.segments.length) {
+  if (
+    !currentTimeline ||
+    !Array.isArray(currentTimeline.segments) ||
+    !currentTimeline.segments.length
+  ) {
     showNativeCaptions();
     hideOverlay();
     return;
   }
 
-  const activeSegments = getActiveSegmentsAtTime(currentTimeline.segments, video.currentTime);
-  const preparedSegments = activeSegments.filter((segment) => normalizeText(segment.translation));
+  const activeSegments = getActiveSegmentsAtTime(
+    currentTimeline.segments,
+    video.currentTime,
+  );
+  const activeSegmentsKey = getSegmentsKey(activeSegments);
+  const preparedSegments = activeSegments.filter((segment) =>
+    normalizeText(segment.translation),
+  );
 
-  if (!activeSegments.length || preparedSegments.length !== activeSegments.length) {
+  if (!activeSegments.length) {
+    clearOverlayHandoff();
+    showNativeCaptions();
+    hideOverlay();
+    return;
+  }
+
+  if (preparedSegments.length !== activeSegments.length) {
+    const now = Date.now();
+    const shouldHoldPreviousOverlay =
+      overlayVisible &&
+      lastRenderedSegmentsKey &&
+      activeSegmentsKey !== lastRenderedSegmentsKey;
+
+    if (shouldHoldPreviousOverlay && overlayHandoffUntil <= now) {
+      overlayHandoffUntil = now + overlayHandoffGraceMs;
+      overlayHandoffSourceKey = lastRenderedSegmentsKey;
+    }
+
+    if (
+      overlayVisible &&
+      overlayHandoffUntil > now &&
+      overlayHandoffSourceKey === lastRenderedSegmentsKey
+    ) {
+      hideNativeCaptions(player);
+      return;
+    }
+
+    clearOverlayHandoff();
     showNativeCaptions();
     hideOverlay();
     return;
@@ -108,17 +154,24 @@ function renderFrame() {
 
   const overlay = ensureOverlay(player);
   const englishNode = overlay.querySelector(`.${overlayEnglishClassName}`);
-  const translationNode = overlay.querySelector(`.${overlayTranslationClassName}`);
+  const translationNode = overlay.querySelector(
+    `.${overlayTranslationClassName}`,
+  );
 
-  if (!(englishNode instanceof HTMLElement) || !(translationNode instanceof HTMLElement)) {
+  if (
+    !(englishNode instanceof HTMLElement) ||
+    !(translationNode instanceof HTMLElement)
+  ) {
     return;
   }
 
   updateOverlaySelectionState(overlay, video.paused);
 
-  const nextEnglishText = normalizeText(preparedSegments.map((segment) => segment.sourceText).join("\n"));
+  const nextEnglishText = normalizeText(
+    preparedSegments.map((segment) => segment.sourceText).join("\n"),
+  );
   const nextTranslationText = normalizeText(
-    preparedSegments.map((segment) => segment.translation).join("\n")
+    preparedSegments.map((segment) => segment.translation).join("\n"),
   );
 
   if (nextEnglishText !== lastEnglishText) {
@@ -130,6 +183,9 @@ function renderFrame() {
     translationNode.textContent = nextTranslationText;
     lastTranslationText = nextTranslationText;
   }
+
+  clearOverlayHandoff();
+  lastRenderedSegmentsKey = activeSegmentsKey;
 
   if (!overlayVisible) {
     overlay.dataset.state = "ready";
@@ -151,10 +207,6 @@ function maybeRefreshWindow() {
     return;
   }
 
-  if (video.paused) {
-    return;
-  }
-
   const currentTime = video.currentTime;
 
   if (!Number.isFinite(currentTime)) {
@@ -165,18 +217,43 @@ function maybeRefreshWindow() {
     return;
   }
 
-  if (currentTimeline.live) {
-    const activeSegments = getActiveSegmentsAtTime(currentTimeline.segments, currentTime);
-    const hasUntranslatedActiveSegment = activeSegments.some((segment) => !normalizeText(segment.translation));
-    const timelineAgeMs = Date.now() - (Number(currentTimeline.generatedAt) || 0);
+  const activeSegments = getActiveSegmentsAtTime(
+    currentTimeline.segments,
+    currentTime,
+  );
+  const hasMissingActiveSegment = activeSegments.length === 0;
+  const hasUntranslatedActiveSegment = activeSegments.some(
+    (segment) => !normalizeText(segment.translation),
+  );
+  const timelineAgeMs = Date.now() - (Number(currentTimeline.generatedAt) || 0);
+  const shouldRetryUntranslatedActiveSegment =
+    (hasMissingActiveSegment || hasUntranslatedActiveSegment) &&
+    timelineAgeMs >= untranslatedSegmentRetryMs;
 
+  if (video.paused) {
+    if (shouldRetryUntranslatedActiveSegment) {
+      void fetchWindowTimeline();
+    }
+
+    return;
+  }
+
+  if (currentTimeline.live) {
     if (
       timelineAgeMs >= liveWindowRefreshIntervalMs ||
-      (hasUntranslatedActiveSegment && timelineAgeMs >= untranslatedSegmentRetryMs)
+      shouldRetryUntranslatedActiveSegment
     ) {
       void fetchWindowTimeline();
       return;
     }
+  }
+
+  if (
+    hasUntranslatedActiveSegment &&
+    timelineAgeMs >= untranslatedSegmentRetryMs
+  ) {
+    void fetchWindowTimeline();
+    return;
   }
 
   if (
@@ -208,7 +285,7 @@ async function fetchWindowTimeline() {
       url: window.location.href,
       currentTime: video.currentTime,
       windowBeforeSeconds,
-      windowAfterSeconds
+      windowAfterSeconds,
     });
 
     if (!response || !response.ok) {
@@ -282,6 +359,11 @@ function showNativeCaptions() {
   }
 }
 
+function clearOverlayHandoff() {
+  overlayHandoffUntil = 0;
+  overlayHandoffSourceKey = "";
+}
+
 function updateOverlaySelectionState(overlay, enabled) {
   const isEnabled = overlay.classList.contains(overlaySelectableClassName);
 
@@ -306,7 +388,10 @@ function clearOverlaySelection(overlay) {
   const anchorNode = selection.anchorNode;
   const focusNode = selection.focusNode;
 
-  if ((anchorNode && overlay.contains(anchorNode)) || (focusNode && overlay.contains(focusNode))) {
+  if (
+    (anchorNode && overlay.contains(anchorNode)) ||
+    (focusNode && overlay.contains(focusNode))
+  ) {
     selection.removeAllRanges();
   }
 }
@@ -343,45 +428,68 @@ function getActiveSegmentsAtTime(segments, currentTime) {
 
   const latestStart = activeSegments.reduce(
     (currentMax, segment) => Math.max(currentMax, Number(segment.offset) || 0),
-    Number.NEGATIVE_INFINITY
+    Number.NEGATIVE_INFINITY,
   );
 
   return activeSegments.filter(
-    (segment) => Math.abs((Number(segment.offset) || 0) - latestStart) < 0.02
+    (segment) => Math.abs((Number(segment.offset) || 0) - latestStart) < 0.02,
   );
+}
+
+function getSegmentsKey(segments) {
+  return segments
+    .map((segment) =>
+      `${Number(segment.offset) || 0}:${Number(segment.duration) || 0}:${normalizeText(segment.sourceText)}`,
+    )
+    .join("|");
 }
 
 function normalizeTimeline(payload) {
   return {
     videoId: typeof payload.videoId === "string" ? payload.videoId.trim() : "",
-    videoUrl: typeof payload.videoUrl === "string" ? payload.videoUrl.trim() : "",
+    videoUrl:
+      typeof payload.videoUrl === "string" ? payload.videoUrl.trim() : "",
     title: typeof payload.title === "string" ? payload.title : "",
     author: typeof payload.author === "string" ? payload.author : "",
-    sourceLanguage: typeof payload.sourceLanguage === "string" ? payload.sourceLanguage : "en",
+    sourceLanguage:
+      typeof payload.sourceLanguage === "string"
+        ? payload.sourceLanguage
+        : "en",
     model: typeof payload.model === "string" ? payload.model : "",
     live: Boolean(payload.live),
-    generatedAt: Number.isFinite(payload.generatedAt) ? Number(payload.generatedAt) : Date.now(),
+    generatedAt: Number.isFinite(payload.generatedAt)
+      ? Number(payload.generatedAt)
+      : Date.now(),
     cached: Boolean(payload.cached),
     complete: Boolean(payload.complete),
-    rangeStart: Number.isFinite(payload.rangeStart) ? Number(payload.rangeStart) : 0,
+    rangeStart: Number.isFinite(payload.rangeStart)
+      ? Number(payload.rangeStart)
+      : 0,
     rangeEnd: Number.isFinite(payload.rangeEnd) ? Number(payload.rangeEnd) : 0,
     segments: Array.isArray(payload.segments)
       ? payload.segments
           .map((segment) => ({
-            offset: Number.isFinite(segment.offset) ? Number(segment.offset) : 0,
-            duration: Number.isFinite(segment.duration) ? Number(segment.duration) : 0,
+            offset: Number.isFinite(segment.offset)
+              ? Number(segment.offset)
+              : 0,
+            duration: Number.isFinite(segment.duration)
+              ? Number(segment.duration)
+              : 0,
             sourceText: normalizeText(segment.sourceText),
-            translation: normalizeText(segment.translation)
+            translation: normalizeText(segment.translation),
           }))
           .filter((segment) => segment.sourceText)
-      : []
+      : [],
   };
 }
 
 function isSubtitlesEnabled() {
   const button = document.querySelector(subtitlesButtonSelector);
 
-  return button instanceof HTMLElement && button.getAttribute("aria-pressed") === "true";
+  return (
+    button instanceof HTMLElement &&
+    button.getAttribute("aria-pressed") === "true"
+  );
 }
 
 function getPlayer() {
